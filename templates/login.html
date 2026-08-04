@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>端口映射控制面板 - 登录</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="login-body">
+    <div class="login-card">
+        <div class="login-logo">
+            <div class="logo-icon">⇄</div>
+            <h1>端口映射控制面板</h1>
+            <p class="subtitle">Port Forward Panel</p>
+        </div>
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="{{ url_for('login') }}" class="login-form">
+            <div class="form-group">
+                <label>账号</label>
+                <input type="text" name="username" autofocus required autocomplete="username" placeholder="请输入账号">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" name="password" required autocomplete="current-password" placeholder="请输入密码">
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">登 录</button>
+        </form>
+        <div class="login-tip">默认账号: admin / admin123 （请登录后及时修改）</div>
+    </div>
+</body>
+</html>

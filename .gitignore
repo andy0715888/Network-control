@@ -1,0 +1,14 @@
+# *.db / 备份
+panel.db
+panel.db.bak.*
+*.db.bak.*
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+.env.bak
+
+# 日志
+*.log
