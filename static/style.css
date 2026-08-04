@@ -178,6 +178,21 @@ button { cursor: pointer; font-family: inherit; }
 .status-dot.on { background: var(--success); box-shadow: 0 0 8px var(--success); }
 .status-dot.off { background: var(--danger); }
 
+/* ===== Switch 开关 ===== */
+.switch { position: relative; display: inline-block; width: 42px; height: 22px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background-color: #3a4350; transition: .2s; border-radius: 22px;
+}
+.slider:before {
+    position: absolute; content: ""; height: 16px; width: 16px;
+    left: 3px; bottom: 3px; background-color: white;
+    transition: .2s; border-radius: 50%;
+}
+input:checked + .slider { background-color: var(--primary); }
+input:checked + .slider:before { transform: translateX(20px); }
+
 /* ===== 表格 ===== */
 .table-wrap { margin-top: 20px; overflow-x: auto; }
 .table { width: 100%; border-collapse: collapse; }

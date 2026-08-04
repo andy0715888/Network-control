@@ -33,41 +33,73 @@
         <section class="tab-panel active" id="tab-forward">
             <div class="page-head">
                 <h2>端口映射配置</h2>
-                <p class="page-desc">将本机指定端口范围的所有流量转发到目标服务器，白名单内端口除外。</p>
+                <p class="page-desc">支持多组转发规则，每组可独立设置目标 IP、端口范围和协议。</p>
             </div>
-            <div class="card">
+
+            <!-- 添加/编辑规则表单 -->
+            <div class="card" id="rule-form-card" style="display:none;">
                 <div class="card-body">
+                    <h4 id="rule-form-title">添加转发规则</h4>
                     <div class="form-grid">
                         <div class="form-group">
                             <label>目标服务器 IP</label>
-                            <input type="text" id="target_ip" placeholder="例如 2.2.2.2">
-                            <span class="hint">流量将转发到此 IP</span>
+                            <input type="text" id="rule_target_ip" placeholder="例如 2.2.2.2">
                         </div>
                         <div class="form-group">
                             <label>转发协议</label>
                             <div class="checkbox-row">
-                                <label class="checkbox"><input type="checkbox" id="proto_tcp" checked> TCP</label>
-                                <label class="checkbox"><input type="checkbox" id="proto_udp" checked> UDP</label>
+                                <label class="checkbox"><input type="checkbox" id="rule_proto_tcp" checked> TCP</label>
+                                <label class="checkbox"><input type="checkbox" id="rule_proto_udp" checked> UDP</label>
                             </div>
                         </div>
                         <div class="form-group">
                             <label>起始端口</label>
-                            <input type="number" id="port_start" min="1" max="65535" value="10000">
+                            <input type="number" id="rule_port_start" min="1" max="65535" value="10000">
                         </div>
                         <div class="form-group">
                             <label>结束端口</label>
-                            <input type="number" id="port_end" min="1" max="65535" value="60000">
-                            <span class="hint">建议范围 10000-60000</span>
+                            <input type="number" id="rule_port_end" min="1" max="65535" value="60000">
                         </div>
+                        <div class="form-group" style="grid-column: 1 / -1;">
+                            <label>备注（可选）</label>
+                            <input type="text" id="rule_note" placeholder="例如: 游戏服务器">
+                        </div>
+                    </div>
+                    <div class="action-row">
+                        <button class="btn btn-primary" id="rule_save_btn">保存规则</button>
+                        <button class="btn btn-danger" id="rule_cancel_btn">取消</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 规则列表 -->
+            <div class="card">
+                <div class="card-body">
+                    <div class="action-row" style="margin-top:0;">
+                        <button class="btn btn-primary" id="btn_new_rule">+ 添加规则</button>
+                        <div style="flex:1;"></div>
+                        <button class="btn btn-success" id="btn_apply_all">应用所有启用规则</button>
+                        <button class="btn btn-danger" id="btn_clear">清除所有规则</button>
                     </div>
                     <div class="status-bar" id="enable_status">
                         <span class="status-dot" id="status_dot"></span>
                         <span id="status_text">加载中...</span>
                     </div>
-                    <div class="action-row">
-                        <button class="btn btn-primary" id="btn_save">保存配置</button>
-                        <button class="btn btn-success" id="btn_apply">应用规则</button>
-                        <button class="btn btn-danger" id="btn_clear">清除规则</button>
+                    <div class="table-wrap">
+                        <table class="table" id="rules_table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>目标 IP</th>
+                                    <th>端口范围</th>
+                                    <th>协议</th>
+                                    <th>备注</th>
+                                    <th>启用</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="rules_tbody"></tbody>
+                        </table>
                     </div>
                 </div>
             </div>

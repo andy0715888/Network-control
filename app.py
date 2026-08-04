@@ -3,8 +3,8 @@
 """端口映射控制面板后端
 
 功能:
-- 账号登录 / 修改密码
-- 配置目标服务器 IP + 端口范围 (10000-60000)
+- 账号登录 / 修改密码 / 修改账号
+- 多组端口映射规则（每组独立 IP + 端口范围 + 协议）
 - 白名单端口管理（白名单内端口不转发）
 - 一键应用 / 清除 iptables 转发规则
 """
@@ -26,9 +26,7 @@ import port_forward as pf
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("PF_DB_PATH", os.path.join(BASE_DIR, "panel.db"))
 
-# 面板监听端口（install.sh 通过环境变量传入）
 PANEL_PORT = int(os.environ.get("PF_PANEL_PORT", "8888"))
-# 默认账号（仅首次初始化使用）
 DEFAULT_USER = os.environ.get("PF_DEFAULT_USER", "admin")
 DEFAULT_PASS = os.environ.get("PF_DEFAULT_PASS", "admin123")
 
@@ -57,17 +55,20 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
+    # 多组转发规则
     c.execute(
-        """CREATE TABLE IF NOT EXISTS config (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            target_ip TEXT,
-            port_start INTEGER,
-            port_end INTEGER,
+        """CREATE TABLE IF NOT EXISTS rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_ip TEXT NOT NULL,
+            port_start INTEGER NOT NULL,
+            port_end INTEGER NOT NULL,
             protocols TEXT DEFAULT 'tcp,udp',
-            enabled INTEGER DEFAULT 0,
+            note TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
+    # 白名单
     c.execute(
         """CREATE TABLE IF NOT EXISTS whitelist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,8 +79,19 @@ def init_db():
             UNIQUE(port, protocol)
         )"""
     )
-    # 默认配置
-    c.execute("INSERT OR IGNORE INTO config (id, target_ip, port_start, port_end) VALUES (1, '', 10000, 60000)")
+    # 旧版迁移：如果存在旧 config 表，把它的数据迁移到 rules
+    old_config = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config'").fetchone()
+    if old_config:
+        old = c.execute("SELECT * FROM config WHERE id = 1").fetchone()
+        if old and old["target_ip"]:
+            exists = c.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
+            if not exists:
+                c.execute(
+                    "INSERT INTO rules (target_ip, port_start, port_end, protocols, note, enabled) VALUES (?,?,?,?,?,1)",
+                    (old["target_ip"], old["port_start"], old["port_end"], old["protocols"] or "tcp,udp", "迁移自旧配置")
+                )
+        c.execute("DROP TABLE IF EXISTS config")
+
     # 默认账号
     if not c.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
         salt = secrets.token_hex(16)
@@ -93,7 +105,6 @@ def init_db():
 
 
 def hash_password(password, salt):
-    """scrypt 哈希"""
     h = scrypt(
         password.encode("utf-8"),
         salt=bytes.fromhex(salt),
@@ -106,7 +117,7 @@ def verify_password(password, salt, expected_hash):
     return secrets.compare_digest(hash_password(password, salt), expected_hash)
 
 
-# ---------------------- 鉴权装饰器 ----------------------
+# ---------------------- 鉴权 ----------------------
 
 def login_required(f):
     @wraps(f)
@@ -216,42 +227,26 @@ def change_username():
     return jsonify({"ok": True, "msg": "用户名修改成功"})
 
 
-# ---------------------- API: 转发配置 ----------------------
+# ---------------------- API: 转发规则 ----------------------
 
-@app.route("/api/config", methods=["GET"])
-@login_required
-def get_config():
-    conn = get_db()
-    row = conn.execute("SELECT * FROM config WHERE id = 1").fetchone()
-    wl = conn.execute(
-        "SELECT id, port, protocol, note FROM whitelist ORDER BY port"
-    ).fetchall()
-    conn.close()
-    return jsonify({
-        "ok": True,
-        "config": {
-            "target_ip": row["target_ip"] or "",
-            "port_start": row["port_start"],
-            "port_end": row["port_end"],
-            "protocols": row["protocols"],
-            "enabled": bool(row["enabled"]),
-        },
-        "whitelist": [dict(w) for w in wl],
-        "panel_port": PANEL_PORT,
-        "iptables_available": pf.has_iptables(),
-    })
-
-
-@app.route("/api/config", methods=["POST"])
-@login_required
-def set_config():
-    data = request.get_json(silent=True) or {}
+def _validate_rule(data):
+    """校验规则数据，返回 (cleaned_dict, error_msg)"""
     target_ip = (data.get("target_ip") or "").strip()
-    port_start = int(data.get("port_start", 10000))
-    port_end = int(data.get("port_end", 60000))
+    try:
+        port_start = int(data.get("port_start", 0))
+        port_end = int(data.get("port_end", 0))
+    except (TypeError, ValueError):
+        return None, "端口必须为整数"
     protocols = data.get("protocols", "tcp,udp")
 
-    # 规范化协议
+    import re
+    if not re.match(r"^(\d{1,3}\.){3}\d{1,3}$", target_ip):
+        return None, "目标 IP 格式不正确"
+    if not (1 <= port_start <= 65535 and 1 <= port_end <= 65535):
+        return None, "端口范围应在 1-65535"
+    if port_start > port_end:
+        return None, "起始端口不能大于结束端口"
+
     proto_list = []
     if isinstance(protocols, str):
         for p in protocols.split(","):
@@ -260,19 +255,92 @@ def set_config():
                 proto_list.append(p)
     protocols = ",".join(proto_list) if proto_list else "tcp,udp"
 
-    if not (1 <= port_start <= 65535 and 1 <= port_end <= 65535):
-        return jsonify({"ok": False, "msg": "端口范围应在 1-65535"})
-    if port_start > port_end:
-        return jsonify({"ok": False, "msg": "起始端口不能大于结束端口"})
+    note = (data.get("note") or "")[:200]
+    enabled = 1 if data.get("enabled", 1) else 0
 
+    return {
+        "target_ip": target_ip,
+        "port_start": port_start,
+        "port_end": port_end,
+        "protocols": protocols,
+        "note": note,
+        "enabled": enabled,
+    }, None
+
+
+@app.route("/api/rules", methods=["GET"])
+@login_required
+def list_rules():
     conn = get_db()
-    conn.execute(
-        """UPDATE config SET target_ip=?, port_start=?, port_end=?, protocols=?, updated_at=CURRENT_TIMESTAMP WHERE id=1""",
-        (target_ip, port_start, port_end, protocols),
+    rules = conn.execute(
+        "SELECT * FROM rules ORDER BY id"
+    ).fetchall()
+    wl = conn.execute(
+        "SELECT id, port, protocol, note FROM whitelist ORDER BY port"
+    ).fetchall()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "rules": [dict(r) for r in rules],
+        "whitelist": [dict(w) for w in wl],
+        "panel_port": PANEL_PORT,
+        "iptables_available": pf.has_iptables(),
+    })
+
+
+@app.route("/api/rules", methods=["POST"])
+@login_required
+def add_rule():
+    data = request.get_json(silent=True) or {}
+    cleaned, err = _validate_rule(data)
+    if err:
+        return jsonify({"ok": False, "msg": err})
+    conn = get_db()
+    cur = conn.execute(
+        """INSERT INTO rules (target_ip, port_start, port_end, protocols, note, enabled)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (cleaned["target_ip"], cleaned["port_start"], cleaned["port_end"],
+         cleaned["protocols"], cleaned["note"], cleaned["enabled"]),
     )
     conn.commit()
+    new_id = cur.lastrowid
     conn.close()
-    return jsonify({"ok": True, "msg": "配置已保存（未应用，请点击「应用规则」生效）"})
+    return jsonify({"ok": True, "msg": "规则已添加", "id": new_id})
+
+
+@app.route("/api/rules/<int:rid>", methods=["PUT"])
+@login_required
+def update_rule(rid):
+    data = request.get_json(silent=True) or {}
+    cleaned, err = _validate_rule(data)
+    if err:
+        return jsonify({"ok": False, "msg": err})
+    conn = get_db()
+    cur = conn.execute(
+        """UPDATE rules SET target_ip=?, port_start=?, port_end=?, protocols=?, note=?, enabled=?, updated_at=CURRENT_TIMESTAMP
+           WHERE id=?""",
+        (cleaned["target_ip"], cleaned["port_start"], cleaned["port_end"],
+         cleaned["protocols"], cleaned["note"], cleaned["enabled"], rid),
+    )
+    conn.commit()
+    affected = cur.rowcount
+    conn.close()
+    if affected == 0:
+        return jsonify({"ok": False, "msg": "规则不存在"})
+    return jsonify({"ok": True, "msg": "规则已更新"})
+
+
+@app.route("/api/rules/<int:rid>", methods=["DELETE"])
+@login_required
+def delete_rule(rid):
+    conn = get_db()
+    cur = conn.execute("DELETE FROM rules WHERE id = ?", (rid,))
+    conn.commit()
+    affected = cur.rowcount
+    conn.close()
+    if affected == 0:
+        return jsonify({"ok": False, "msg": "规则不存在"})
+    return jsonify({"ok": True, "msg": "规则已删除"})
 
 
 # ---------------------- API: 白名单 ----------------------
@@ -319,40 +387,35 @@ def del_whitelist(wid):
 @login_required
 def apply_rules():
     conn = get_db()
-    row = conn.execute("SELECT * FROM config WHERE id = 1").fetchone()
+    rules = conn.execute("SELECT * FROM rules WHERE enabled = 1 ORDER BY id").fetchall()
     wl = conn.execute("SELECT port FROM whitelist").fetchall()
     conn.close()
 
-    target_ip = row["target_ip"]
-    if not target_ip:
-        return jsonify({"ok": False, "msg": "请先填写目标服务器 IP"})
+    if not rules:
+        return jsonify({"ok": False, "msg": "没有启用的转发规则"})
 
     whitelist = [w["port"] for w in wl]
-    ok, msg = pf.apply_config(
-        target_ip=target_ip,
-        port_start=row["port_start"],
-        port_end=row["port_end"],
+    rules_data = [
+        {
+            "target_ip": r["target_ip"],
+            "port_start": r["port_start"],
+            "port_end": r["port_end"],
+            "protocols": r["protocols"],
+        }
+        for r in rules
+    ]
+    ok, msg = pf.apply_multi_rules(
+        rules=rules_data,
         whitelist=whitelist,
-        protocols=row["protocols"],
         panel_port=PANEL_PORT,
     )
-    if ok:
-        conn = get_db()
-        conn.execute("UPDATE config SET enabled = 1 WHERE id = 1")
-        conn.commit()
-        conn.close()
     return jsonify({"ok": ok, "msg": msg})
 
 
 @app.route("/api/clear", methods=["POST"])
 @login_required
 def clear_rules():
-    conn = get_db()
-    row = conn.execute("SELECT target_ip FROM config WHERE id = 1").fetchone()
-    conn.execute("UPDATE config SET enabled = 0 WHERE id = 1")
-    conn.commit()
-    conn.close()
-    pf.clear_rules(old_target_ip=row["target_ip"] if row else None)
+    pf.clear_all_rules()
     return jsonify({"ok": True, "msg": "已清除所有转发规则"})
 
 
@@ -365,20 +428,26 @@ def status():
 @app.route("/api/reapply", methods=["POST"])
 @login_required
 def reapply():
-    """开机自启调用：若 enabled=1 则重新应用"""
+    """开机自启调用：若有启用的规则则重新应用"""
     conn = get_db()
-    row = conn.execute("SELECT * FROM config WHERE id = 1").fetchone()
+    rules = conn.execute("SELECT * FROM rules WHERE enabled = 1 ORDER BY id").fetchall()
     wl = conn.execute("SELECT port FROM whitelist").fetchall()
     conn.close()
-    if not row or not row["enabled"] or not row["target_ip"]:
-        return jsonify({"ok": True, "msg": "未启用，跳过"})
+    if not rules:
+        return jsonify({"ok": True, "msg": "没有启用的规则，跳过"})
     whitelist = [w["port"] for w in wl]
-    ok, msg = pf.apply_config(
-        target_ip=row["target_ip"],
-        port_start=row["port_start"],
-        port_end=row["port_end"],
+    rules_data = [
+        {
+            "target_ip": r["target_ip"],
+            "port_start": r["port_start"],
+            "port_end": r["port_end"],
+            "protocols": r["protocols"],
+        }
+        for r in rules
+    ]
+    ok, msg = pf.apply_multi_rules(
+        rules=rules_data,
         whitelist=whitelist,
-        protocols=row["protocols"],
         panel_port=PANEL_PORT,
     )
     return jsonify({"ok": ok, "msg": msg})

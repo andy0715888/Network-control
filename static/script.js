@@ -1,4 +1,5 @@
-// ===== 工具函数 =====
+let editingRuleId = null;
+
 const $ = (id) => document.getElementById(id);
 
 function toast(msg, type = 'success') {
@@ -24,7 +25,7 @@ async function api(url, method = 'GET', body = null) {
     return data;
 }
 
-// ===== 标签切换 =====
+// 标签切换
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', (e) => {
         e.preventDefault();
@@ -36,76 +37,167 @@ document.querySelectorAll('.nav-item').forEach(item => {
     });
 });
 
-// ===== 加载配置 =====
-async function loadConfig() {
-    const data = await api('/api/config');
+// ==================== 规则管理 ====================
+
+async function loadRules() {
+    const data = await api('/api/rules');
     if (!data.ok) return;
-    const c = data.config;
-    $('target_ip').value = c.target_ip || '';
-    $('port_start').value = c.port_start;
-    $('port_end').value = c.port_end;
-    $('proto_tcp').checked = c.protocols.includes('tcp');
-    $('proto_udp').checked = c.protocols.includes('udp');
-    updateStatus(c.enabled);
+    renderRules(data.rules);
     renderWhitelist(data.whitelist);
+    updateStatusIndicator(data.rules);
     if (!data.iptables_available) {
         toast('警告：未检测到 iptables，请先安装', 'error');
     }
 }
 
-function updateStatus(enabled) {
+function updateStatusIndicator(rules) {
+    const enabledCount = rules.filter(r => r.enabled).length;
     const dot = $('status_dot');
     const text = $('status_text');
-    if (enabled) {
+    if (enabledCount > 0) {
         dot.className = 'status-dot on';
-        text.textContent = '转发已启用';
+        text.textContent = `${enabledCount} 条规则已启用`;
     } else {
         dot.className = 'status-dot off';
-        text.textContent = '转发未启用';
+        text.textContent = '暂无启用的规则';
     }
 }
 
-// ===== 保存配置 =====
-$('btn_save').addEventListener('click', async () => {
-    const protos = [];
-    if ($('proto_tcp').checked) protos.push('tcp');
-    if ($('proto_udp').checked) protos.push('udp');
-    if (protos.length === 0) { toast('请至少选择一种协议', 'error'); return; }
-    const data = await api('/api/config', 'POST', {
-        target_ip: $('target_ip').value.trim(),
-        port_start: parseInt($('port_start').value),
-        port_end: parseInt($('port_end').value),
-        protocols: protos.join(','),
-    });
+function renderRules(rules) {
+    const tbody = $('rules_tbody');
+    if (!rules.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim);">暂无转发规则，点击「+ 添加规则」创建</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rules.map(r => `
+        <tr>
+            <td>${r.id}</td>
+            <td><strong>${escapeHtml(r.target_ip)}</strong></td>
+            <td>${r.port_start} - ${r.port_end}</td>
+            <td>${r.protocols}</td>
+            <td>${escapeHtml(r.note || '-')}</td>
+            <td>
+                <label class="switch">
+                    <input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleRule(${r.id})">
+                    <span class="slider"></span>
+                </label>
+            </td>
+            <td>
+                <button class="btn-link" onclick="editRule(${r.id})">编辑</button>
+                <button class="btn-link" onclick="deleteRule(${r.id})" style="color:var(--danger);">删除</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function showRuleForm(rule = null) {
+    editingRuleId = rule ? rule.id : null;
+    $('rule-form-title').textContent = rule ? '编辑转发规则' : '添加转发规则';
+    $('rule_target_ip').value = rule ? rule.target_ip : '';
+    $('rule_port_start').value = rule ? rule.port_start : 10000;
+    $('rule_port_end').value = rule ? rule.port_end : 60000;
+    $('rule_proto_tcp').checked = rule ? rule.protocols.includes('tcp') : true;
+    $('rule_proto_udp').checked = rule ? rule.protocols.includes('udp') : true;
+    $('rule_note').value = rule ? (rule.note || '') : '';
+    $('rule-form-card').style.display = 'block';
+    $('rule-form-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function hideRuleForm() {
+    $('rule-form-card').style.display = 'none';
+    editingRuleId = null;
+}
+
+async function toggleRule(id) {
+    const data = await api(`/api/rules/${id}`);
+    // 获取当前规则
+    const rules = (await api('/api/rules')).rules;
+    const rule = rules.find(r => r.id === id);
+    if (!rule) return;
+    const newEnabled = rule.enabled ? 0 : 1;
+    const result = await api(`/api/rules/${id}`, 'PUT', { ...rule, enabled: newEnabled });
+    toast(result.msg, result.ok ? 'success' : 'error');
+    if (result.ok) await loadRules();
+}
+
+async function editRule(id) {
+    const rules = (await api('/api/rules')).rules;
+    const rule = rules.find(r => r.id === id);
+    if (rule) showRuleForm(rule);
+}
+
+async function deleteRule(id) {
+    if (!confirm('确认删除此规则？')) return;
+    const data = await api(`/api/rules/${id}`, 'DELETE');
     toast(data.msg, data.ok ? 'success' : 'error');
+    if (data.ok) await loadRules();
+}
+
+window.toggleRule = toggleRule;
+window.editRule = editRule;
+window.deleteRule = deleteRule;
+
+// 按钮事件
+$('btn_new_rule').addEventListener('click', () => showRuleForm());
+$('rule_cancel_btn').addEventListener('click', hideRuleForm);
+
+$('rule_save_btn').addEventListener('click', async () => {
+    const target_ip = $('rule_target_ip').value.trim();
+    const port_start = parseInt($('rule_port_start').value);
+    const port_end = parseInt($('rule_port_end').value);
+    const protos = [];
+    if ($('rule_proto_tcp').checked) protos.push('tcp');
+    if ($('rule_proto_udp').checked) protos.push('udp');
+    const note = $('rule_note').value.trim();
+
+    if (!target_ip) { toast('请输入目标 IP', 'error'); return; }
+    if (!protos.length) { toast('请至少选择一种协议', 'error'); return; }
+
+    const body = {
+        target_ip, port_start, port_end,
+        protocols: protos.join(','),
+        note,
+        enabled: 1,
+    };
+
+    let data;
+    if (editingRuleId) {
+        body.enabled = (await api('/api/rules')).rules.find(r => r.id === editingRuleId)?.enabled ?? 1;
+        data = await api(`/api/rules/${editingRuleId}`, 'PUT', body);
+    } else {
+        data = await api('/api/rules', 'POST', body);
+    }
+    toast(data.msg, data.ok ? 'success' : 'error');
+    if (data.ok) { hideRuleForm(); await loadRules(); }
 });
 
-// ===== 应用规则 =====
-$('btn_apply').addEventListener('click', async () => {
-    if (!$('target_ip').value.trim()) { toast('请先填写目标 IP', 'error'); return; }
-    if (!confirm('确认应用端口映射规则？这将修改服务器 iptables。')) return;
-    const btn = $('btn_apply');
+$('btn_apply_all').addEventListener('click', async () => {
+    const rules = (await api('/api/rules')).rules;
+    const enabledCount = rules.filter(r => r.enabled).length;
+    if (enabledCount === 0) { toast('没有启用的规则', 'error'); return; }
+    if (!confirm(`确认应用 ${enabledCount} 条启用的转发规则？这将修改服务器 iptables。`)) return;
+    const btn = $('btn_apply_all');
     btn.disabled = true; btn.textContent = '应用中...';
     const data = await api('/api/apply', 'POST');
-    btn.disabled = false; btn.textContent = '应用规则';
+    btn.disabled = false; btn.textContent = '应用所有启用规则';
     toast(data.msg, data.ok ? 'success' : 'error');
-    if (data.ok) { await loadConfig(); loadStatus(); }
+    if (data.ok) { await loadRules(); loadStatus(); }
 });
 
-// ===== 清除规则 =====
 $('btn_clear').addEventListener('click', async () => {
     if (!confirm('确认清除所有转发规则？')) return;
     const data = await api('/api/clear', 'POST');
     toast(data.msg, data.ok ? 'success' : 'error');
-    if (data.ok) updateStatus(false);
+    if (data.ok) { await loadRules(); loadStatus(); }
 });
 
-// ===== 白名单 =====
-$('btn_add_wl').addEventListener('click', async () => {
-    const port = $('wl_port').value;
+// ==================== 白名单 ====================
+
+async function addWhitelist() {
+    const port = parseInt($('wl_port').value);
     if (!port) { toast('请输入端口', 'error'); return; }
     const data = await api('/api/whitelist', 'POST', {
-        port: parseInt(port),
+        port,
         protocol: $('wl_protocol').value,
         note: $('wl_note').value,
     });
@@ -113,9 +205,17 @@ $('btn_add_wl').addEventListener('click', async () => {
     if (data.ok) {
         $('wl_port').value = '';
         $('wl_note').value = '';
-        await loadConfig();
+        await loadRules();
     }
-});
+}
+
+async function delWl(id) {
+    if (!confirm('删除该白名单端口？')) return;
+    const data = await api(`/api/whitelist/${id}`, 'DELETE');
+    toast(data.msg, data.ok ? 'success' : 'error');
+    if (data.ok) await loadRules();
+}
+window.delWl = delWl;
 
 function renderWhitelist(list) {
     const tbody = $('wl_table');
@@ -133,19 +233,10 @@ function renderWhitelist(list) {
     `).join('');
 }
 
-async function delWl(id) {
-    if (!confirm('删除该白名单端口？')) return;
-    const data = await api('/api/whitelist/' + id, 'DELETE');
-    toast(data.msg, data.ok ? 'success' : 'error');
-    if (data.ok) await loadConfig();
-}
-window.delWl = delWl;
+$('btn_add_wl').addEventListener('click', addWhitelist);
 
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-}
+// ==================== 状态 ====================
 
-// ===== 规则状态 =====
 $('btn_refresh_status').addEventListener('click', loadStatus);
 
 async function loadStatus() {
@@ -155,7 +246,8 @@ async function loadStatus() {
     $('nat_output').textContent = data.data.nat_table || '（无）';
 }
 
-// ===== 账号设置 =====
+// ==================== 账号 ====================
+
 $('btn_change_username').addEventListener('click', async () => {
     const username = $('new_username').value.trim();
     const pwd = $('verify_pwd_username').value;
@@ -186,5 +278,9 @@ $('btn_change_password').addEventListener('click', async () => {
     }
 });
 
-// ===== 初始化 =====
-loadConfig();
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+// 初始化
+loadRules();

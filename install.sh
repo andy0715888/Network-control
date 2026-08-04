@@ -94,12 +94,19 @@ download_file() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/app.py" ]; then
     info "使用本地文件安装 ..."
-    cp -f "$SCRIPT_DIR/app.py" "$INSTALL_DIR/"
-    cp -f "$SCRIPT_DIR/port_forward.py" "$INSTALL_DIR/"
-    cp -f "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
-    mkdir -p "$INSTALL_DIR/templates" "$INSTALL_DIR/static"
-    cp -f "$SCRIPT_DIR/templates/"*.html "$INSTALL_DIR/templates/" 2>/dev/null || true
-    cp -f "$SCRIPT_DIR/static/"* "$INSTALL_DIR/static/" 2>/dev/null || true
+    # 避免源和目标相同时 cp 报 "are the same file"
+    SAME_DIR=false
+    [ "$SCRIPT_DIR" = "$INSTALL_DIR" ] && SAME_DIR=true
+    if [ "$SAME_DIR" = false ]; then
+        cp -f "$SCRIPT_DIR/app.py" "$INSTALL_DIR/"
+        cp -f "$SCRIPT_DIR/port_forward.py" "$INSTALL_DIR/"
+        cp -f "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
+        mkdir -p "$INSTALL_DIR/templates" "$INSTALL_DIR/static"
+        cp -f "$SCRIPT_DIR/templates/"*.html "$INSTALL_DIR/templates/" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/static/"* "$INSTALL_DIR/static/" 2>/dev/null || true
+    else
+        info "  源和目标是同一目录，跳过文件复制"
+    fi
 else
     info "从远程仓库下载文件 (多镜像自动回退) ..."
     info "  镜像1: raw.githubusercontent.com"
@@ -129,11 +136,44 @@ fi
 # ---- Python 虚拟环境 ----
 info "创建 Python 虚拟环境 ..."
 cd "$INSTALL_DIR"
-if [ ! -d "venv" ]; then
-    "$PYTHON_BIN" -m venv venv
+if [ ! -d "venv" ] || [ ! -f "venv/bin/pip" ]; then
+    # 如果 venv 目录损坏或 pip 不存在，删除重建
+    [ -d "venv" ] && rm -rf venv
+    if ! "$PYTHON_BIN" -m venv venv 2>/dev/null; then
+        # python3-venv 可能未安装，尝试安装
+        warn "python3 -m venv 失败，尝试安装 python3-venv ..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get install -y python3-venv >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y python3-venv >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y python3-venv >/dev/null 2>&1 || true
+        fi
+        # 再试一次
+        if ! "$PYTHON_BIN" -m venv venv 2>/dev/null; then
+            # 最后回退：用 virtualenv 或直接用系统 pip
+            warn "venv 创建失败，尝试使用 virtualenv ..."
+            if ! "$PYTHON_BIN" -m pip install virtualenv -q 2>/dev/null; then
+                pip3 install virtualenv -q 2>/dev/null || true
+            fi
+            if command -v virtualenv >/dev/null 2>&1; then
+                virtualenv -p "$PYTHON_BIN" venv 2>/dev/null || {
+                    error "虚拟环境创建失败，请手动执行: $PYTHON_BIN -m venv venv"
+                    exit 1
+                }
+            else
+                error "无法创建虚拟环境，需要 python3-venv 或 virtualenv"
+                error "请手动安装后重试：apt-get install python3-venv"
+                exit 1
+            fi
+        fi
+    fi
 fi
-./venv/bin/pip install --upgrade pip -q
-./venv/bin/pip install -r requirements.txt -q
+./venv/bin/pip install --upgrade pip -q 2>/dev/null || true
+./venv/bin/pip install -r requirements.txt -q 2>/dev/null || {
+    error "依赖安装失败，请检查网络连接"
+    exit 1
+}
 
 # ---- 生成随机密钥（仅首次）----
 ENV_FILE="$INSTALL_DIR/.env"

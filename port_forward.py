@@ -16,7 +16,6 @@ CHAIN_NAME = "PORT_FORWARD"
 
 
 def run_cmd(cmd):
-    """执行 shell 命令，返回 (成功与否, 输出)"""
     try:
         result = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=60
@@ -27,9 +26,7 @@ def run_cmd(cmd):
 
 
 def enable_ip_forwarding():
-    """开启内核 IPv4 转发并持久化"""
     run_cmd("sysctl -w net.ipv4.ip_forward=1")
-    # 持久化到 sysctl.conf
     run_cmd(
         "grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf && "
         "sed -i 's/^net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf || "
@@ -39,7 +36,6 @@ def enable_ip_forwarding():
 
 
 def ensure_chain():
-    """确保自定义链存在，并挂到 PREROUTING"""
     run_cmd(f"iptables -t nat -N {CHAIN_NAME} 2>/dev/null || true")
     run_cmd(
         f"iptables -t nat -C PREROUTING -j {CHAIN_NAME} 2>/dev/null || "
@@ -47,14 +43,20 @@ def ensure_chain():
     )
 
 
-def clear_rules(old_target_ip=None):
-    """清空转发链及旧目标的 MASQUERADE 规则"""
+def clear_all_rules():
+    """清空所有转发规则（链 + POSTROUTING MASQUERADE）"""
     run_cmd(f"iptables -t nat -F {CHAIN_NAME} 2>/dev/null || true")
-    if old_target_ip:
-        run_cmd(
-            f"iptables -t nat -C POSTROUTING -d {old_target_ip} -j MASQUERADE 2>/dev/null && "
-            f"iptables -t nat -D POSTROUTING -d {old_target_ip} -j MASQUERADE || true"
-        )
+    # 清除所有 PORT_FORWARD 链相关的 MASQUERADE 规则
+    _, post = run_cmd("iptables -t nat -L POSTROUTING -n 2>/dev/null")
+    for line in post.split("\n"):
+        if "MASQUERADE" in line and "PORT_FORWARD" not in line:
+            # 获取 -d 参数
+            m = re.search(r"d\.?(\d+\.\d+\.\d+\.\d+)", line)
+            if m:
+                ip = m.group(1)
+                run_cmd(
+                    f"iptables -t nat -D POSTROUTING -d {ip} -j MASQUERADE 2>/dev/null || true"
+                )
 
 
 def _valid_ip(ip):
@@ -69,33 +71,40 @@ def _valid_port(p):
         return False
 
 
-def apply_config(target_ip, port_start, port_end, whitelist, protocols="tcp,udp", panel_port=None):
-    """应用端口映射配置
+def apply_multi_rules(rules, whitelist, panel_port=None):
+    """批量应用多组端口映射规则
 
     参数:
-        target_ip: 目标服务器 IP
-        port_start/port_end: 转发端口范围
-        whitelist: list[int] 白名单端口（不转发）
-        protocols: "tcp" / "udp" / "tcp,udp"
-        panel_port: 面板自身端口，自动加入白名单避免被转发导致失联
+        rules: list[dict]  每项 {target_ip, port_start, port_end, protocols}
+        whitelist: list[int]  白名单端口
+        panel_port: 面板端口（自动加入白名单）
     返回: (成功与否, 消息)
     """
-    if not _valid_ip(target_ip):
-        return False, "目标 IP 格式不正确"
-    if not (_valid_port(port_start) and _valid_port(port_end)):
-        return False, "端口范围不合法"
-    if int(port_start) > int(port_end):
-        return False, "起始端口不能大于结束端口"
+    if not rules:
+        return False, "没有要应用的规则"
 
-    protos = []
-    if "tcp" in protocols:
-        protos.append("tcp")
-    if "udp" in protocols:
-        protos.append("udp")
-    if not protos:
-        return False, "未选择协议"
+    # 校验所有规则
+    for i, r in enumerate(rules):
+        if not _valid_ip(r["target_ip"]):
+            return False, f"规则{i+1}: 目标 IP 格式不正确"
+        if not (_valid_port(r["port_start"]) and _valid_port(r["port_end"])):
+            return False, f"规则{i+1}: 端口范围不合法"
+        if int(r["port_start"]) > int(r["port_end"]):
+            return False, f"规则{i+1}: 起始端口大于结束端口"
 
-    # 面板端口自动加入白名单
+    # 收集所有涉及的目标 IP（用于 MASQUERADE）
+    target_ips = list({r["target_ip"] for r in rules})
+
+    # 规范化协议
+    for r in rules:
+        protos = []
+        for p in (r.get("protocols", "tcp,udp") or "").split(","):
+            p = p.strip().lower()
+            if p in ("tcp", "udp"):
+                protos.append(p)
+        r["_protos"] = protos or ["tcp", "udp"]
+
+    # 白名单
     wl_set = set()
     for p in whitelist:
         if _valid_port(p):
@@ -106,42 +115,62 @@ def apply_config(target_ip, port_start, port_end, whitelist, protocols="tcp,udp"
     enable_ip_forwarding()
     ensure_chain()
 
-    # 清空链
+    # 清空旧链
     run_cmd(f"iptables -t nat -F {CHAIN_NAME} 2>/dev/null || true")
-    # 删除旧目标的 MASQUERADE（若目标变更）
-    run_cmd(
-        f"iptables -t nat -D POSTROUTING -d {target_ip} -j MASQUERADE 2>/dev/null || true"
-    )
+
+    # 清除旧 MASQUERADE
+    for ip in target_ips:
+        run_cmd(
+            f"iptables -t nat -D POSTROUTING -d {ip} -j MASQUERADE 2>/dev/null || true"
+        )
 
     # 白名单优先 RETURN
     for port in sorted(wl_set):
-        for proto in protos:
+        for proto in ("tcp", "udp"):
             run_cmd(
                 f"iptables -t nat -A {CHAIN_NAME} -p {proto} --dport {port} -j RETURN"
             )
 
-    # 范围 DNAT
-    for proto in protos:
+    # 为每组规则添加 DNAT
+    for r in rules:
+        for proto in r["_protos"]:
+            ok, msg = run_cmd(
+                f"iptables -t nat -A {CHAIN_NAME} -p {proto} "
+                f"--dport {int(r['port_start'])}:{int(r['port_end'])} "
+                f"-j DNAT --to-destination {r['target_ip']}"
+            )
+            if not ok:
+                return False, f"添加 DNAT 规则失败 (目标 {r['target_ip']}, {proto}): {msg}"
+
+    # MASQUERADE 回程（每个目标 IP 一条）
+    for ip in target_ips:
         ok, msg = run_cmd(
-            f"iptables -t nat -A {CHAIN_NAME} -p {proto} "
-            f"--dport {int(port_start)}:{int(port_end)} "
-            f"-j DNAT --to-destination {target_ip}"
+            f"iptables -t nat -A POSTROUTING -d {ip} -j MASQUERADE"
         )
         if not ok:
-            return False, f"添加 {proto} DNAT 规则失败: {msg}"
+            return False, f"添加 MASQUERADE 失败 ({ip}): {msg}"
 
-    # MASQUERADE 回程
-    ok, msg = run_cmd(
-        f"iptables -t nat -A POSTROUTING -d {target_ip} -j MASQUERADE"
+    summary = "; ".join(
+        f"{r['target_ip']}:{r['port_start']}-{r['port_end']}" for r in rules
     )
-    if not ok:
-        return False, f"添加 MASQUERADE 失败: {msg}"
+    return True, f"已应用 {len(rules)} 组规则: {summary}"
 
-    return True, f"已应用: {target_ip} 端口 {port_start}-{port_end} ({','.join(protos)})"
+
+def apply_config(target_ip, port_start, port_end, whitelist, protocols="tcp,udp", panel_port=None):
+    """单规则兼容接口（内部转调 apply_multi_rules）"""
+    return apply_multi_rules(
+        rules=[{
+            "target_ip": target_ip,
+            "port_start": port_start,
+            "port_end": port_end,
+            "protocols": protocols,
+        }],
+        whitelist=whitelist,
+        panel_port=panel_port,
+    )
 
 
 def get_status():
-    """获取当前 nat 表中相关规则"""
     _, nat_all = run_cmd("iptables -t nat -L -n -v --line-numbers")
     _, chain_rules = run_cmd(f"iptables -t nat -L {CHAIN_NAME} -n -v --line-numbers 2>/dev/null")
     return {
