@@ -119,9 +119,18 @@ def verify_password(password, salt, expected_hash):
 
 # ---------------------- 鉴权 ----------------------
 
+def is_local_internal():
+    """判断是否为 localhost 内部调用（开机自启 / systemd 回调）"""
+    remote = request.remote_addr or ""
+    return remote in ("127.0.0.1", "::1", "localhost")
+
+
 def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
+        # 允许 localhost 内部调用 POST /api/reapply（开机自启）
+        if is_local_internal() and request.path == "/api/reapply" and request.method == "POST":
+            return f(*args, **kwargs)
         if "user" not in session:
             if request.path.startswith("/api/"):
                 return jsonify({"ok": False, "msg": "未登录"}), 401
