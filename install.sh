@@ -34,17 +34,37 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# ---- 警示：检测 URL 反引号误用 ----
+# 如果通过管道运行，提示用户不要在 URL 两侧加反引号
+if [ ! -t 0 ] || [ -p /dev/stdin ]; then
+    warn "提示: 安装命令中 URL 两侧请不要加反引号 (\`...\`)"
+    warn "  正确写法: curl -fsSL https://.../install.sh | bash"
+    echo ""
+fi
+
+# ---- apt-get update 辅助（最多执行一次）----
+_APT_UPDATED=0
+apt_update_once() {
+    if [ "$_APT_UPDATED" = "0" ] && command -v apt-get >/dev/null 2>&1; then
+        info "刷新 APT 软件源缓存（首次安装）..."
+        apt-get update -y >/dev/null 2>&1 || warn "apt-get update 失败，继续尝试安装（如源已缓存可忽略）"
+        _APT_UPDATED=1
+    fi
+}
+
 # ---- 系统检测 ----
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     info "安装 Python3 ..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y && apt-get install -y python3 python3-pip python3-venv
+        apt_update_once
+        apt-get install -y python3 python3-pip python3-venv >/dev/null 2>&1 || true
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y python3 python3-pip
+        yum install -y python3 python3-pip >/dev/null 2>&1 || true
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-pip
-    else
-        error "不支持的系统，请手动安装 python3"
+        dnf install -y python3 python3-pip >/dev/null 2>&1 || true
+    fi
+    if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+        error "Python3 安装失败，请手动安装后重试: apt-get install -y python3 python3-pip python3-venv"
         exit 1
     fi
 fi
@@ -53,11 +73,22 @@ fi
 if ! command -v iptables >/dev/null 2>&1; then
     info "安装 iptables ..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y iptables
+        apt_update_once
+        # 兼容: Debian/Ubuntu 部分版本 iptables 为 transitional package，iptables-nft 是实际包
+        apt-get install -y iptables iptables-nft >/dev/null 2>&1 || apt-get install -y iptables >/dev/null 2>&1 || true
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y iptables
+        yum install -y iptables >/dev/null 2>&1 || true
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y iptables
+        dnf install -y iptables >/dev/null 2>&1 || true
+    fi
+    if ! command -v iptables >/dev/null 2>&1; then
+        warn "iptables 命令仍未找到，面板将启动但无法应用转发规则"
+        warn "请手动执行：apt-get install -y iptables iptables-nft"
+    fi
+else
+    # 有些系统 iptables 是旧版本，检查 iptables-legacy / iptables-nft 是否有可用的
+    if ! iptables -L >/dev/null 2>&1; then
+        warn "iptables 命令存在但执行失败（可能是容器 / nftables 替代）"
     fi
 fi
 
@@ -143,6 +174,7 @@ if [ ! -d "venv" ] || [ ! -f "venv/bin/pip" ]; then
         # python3-venv 可能未安装，尝试安装
         warn "python3 -m venv 失败，尝试安装 python3-venv ..."
         if command -v apt-get >/dev/null 2>&1; then
+            apt_update_once
             apt-get install -y python3-venv >/dev/null 2>&1 || true
         elif command -v yum >/dev/null 2>&1; then
             yum install -y python3-venv >/dev/null 2>&1 || true
