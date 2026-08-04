@@ -279,12 +279,14 @@ def list_rules():
         "SELECT id, port, protocol, note FROM whitelist ORDER BY port"
     ).fetchall()
     conn.close()
+    diag = pf.diagnose()
     return jsonify({
         "ok": True,
         "rules": [dict(r) for r in rules],
         "whitelist": [dict(w) for w in wl],
         "panel_port": PANEL_PORT,
         "iptables_available": pf.has_iptables(),
+        "diagnose": diag,
     })
 
 
@@ -423,6 +425,13 @@ def clear_rules():
 @login_required
 def status():
     return jsonify({"ok": True, "data": pf.get_status()})
+
+
+@app.route("/api/diagnose", methods=["GET"])
+@login_required
+def diagnose_api():
+    """系统诊断"""
+    return jsonify({"ok": True, "data": pf.diagnose()})
 
 
 @app.route("/api/reapply", methods=["POST"])
