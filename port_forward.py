@@ -102,15 +102,17 @@ def enable_ip_forwarding():
 
 
 def ensure_chains():
-    """确保所有自定义链存在"""
+    """确保所有自定义链存在，并挂接到 PREROUTING / FORWARD"""
     # nat 表 PORT_FORWARD 链（DNAT）
     ipt("nat", f"-N {CHAIN_NAME} 2>/dev/null || true")
-    ipt("nat", f"-C PREROUTING -j {CHAIN_NAME} 2>/dev/null || "
-                 f"-A PREROUTING -j {CHAIN_NAME}")
+    ok, _ = ipt("nat", f"-C PREROUTING -j {CHAIN_NAME}")
+    if not ok:
+        ipt("nat", f"-A PREROUTING -j {CHAIN_NAME}")
     # filter 表 PORT_FORWARD_FWD 链（FORWARD 放行）
     ipt("filter", f"-N {FORWARD_CHAIN} 2>/dev/null || true")
-    ipt("filter", f"-C FORWARD -j {FORWARD_CHAIN} 2>/dev/null || "
-                  f"-A FORWARD -j {FORWARD_CHAIN}")
+    ok, _ = ipt("filter", f"-C FORWARD -j {FORWARD_CHAIN}")
+    if not ok:
+        ipt("filter", f"-A FORWARD -j {FORWARD_CHAIN}")
 
 
 def clear_all_rules():
