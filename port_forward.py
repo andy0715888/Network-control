@@ -17,11 +17,60 @@ FORWARD_CHAIN = "PORT_FORWARD_FWD"
 
 # 检测实际使用的 iptables 命令
 def _detect_iptables():
-    """自动检测 iptables 类型：legacy / nft / 原生"""
-    for cmd in ["iptables-legacy", "iptables-nft", "iptables"]:
-        if os.path.exists(f"/usr/sbin/{cmd}") or os.path.exists(f"/sbin/{cmd}"):
-            return cmd
-    # 兜底：直接用 iptables
+    """智能选择 iptables 后端（必须与系统默认一致，否则规则写入不生效）
+
+    检测逻辑：
+    1) 运行 `iptables --version`，读取括号里的标识：
+       - '(nf_tables)' → 系统默认是 nftables，优先 iptables-nft
+       - '(legacy)' → 系统默认是 legacy，优先 iptables-legacy
+    2) 如果版本命令不可用或括号没读到，按系统实际 iptables 存在性回退
+    3) 最终兜底：直接用 `iptables`（系统默认）
+
+    不能简单按文件存在顺序乱选，否则 legacy/nft 表互不相干，规则白写。
+    """
+    # 第 1 步：读 iptables --version 判断系统默认后端
+    prefer = None  # 'nft' / 'legacy' / None
+    try:
+        r = subprocess.run(
+            ["iptables", "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        ver = (r.stdout or "") + (r.stderr or "")
+        m = re.search(r"\(([^)]+)\)", ver)
+        if m:
+            tag = m.group(1).lower()
+            if "nft" in tag:
+                prefer = "nft"
+            elif "legacy" in tag:
+                prefer = "legacy"
+    except Exception:
+        pass
+
+    # 第 2 步：按偏好顺序找可执行文件
+    def _exists(cmd):
+        for p in (f"/usr/sbin/{cmd}", f"/sbin/{cmd}"):
+            if os.path.exists(p):
+                return True
+        # which 兜底
+        try:
+            r = subprocess.run(["which", cmd], capture_output=True, timeout=3)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    if prefer == "nft":
+        for c in ("iptables-nft", "iptables"):
+            if _exists(c):
+                return c
+    if prefer == "legacy":
+        for c in ("iptables-legacy", "iptables"):
+            if _exists(c):
+                return c
+
+    # 无法判断偏好 → 先按文件存在，最后一定是 iptables
+    for c in ("iptables-nft", "iptables-legacy", "iptables"):
+        if _exists(c):
+            return c
     return "iptables"
 
 IPTABLES = _detect_iptables()
